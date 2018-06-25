@@ -31,6 +31,26 @@ class WrongDataTypeError(RepositoryClientError):
 
 class ArtifactNotFoundError(RepositoryClientError):
     pass
+    
+def detect_Nexus3(*args):
+    try:
+        if len(args) == 0:
+            test_url = os.environ.get('REPOSITORY_URL') + '/service/rest/beta/repositories'
+            r = requests.get(os.environ.get('REPOSITORY_URL'), auth=(os.environ.get('REPOSITORY_USER'), os.environ['REPOSITORY_PASSWORD']))
+        else:
+            test_url = args[0] + '/service/rest/beta/repositories'
+            if len(args) == 1:
+                r = requests.get(test_url, auth=(os.environ.get('REPOSITORY_USER'), os.environ['REPOSITORY_PASSWORD']))
+            elif len(args) == 2:
+                r = requests.get(test_url, auth=(args[1], os.environ['REPOSITORY_PASSWORD']))
+            elif len(args) == 3:
+                r = requests.get(test_url, auth=(args[1], args[2]))
+            
+        r.raise_for_status()
+        return True
+    except:
+        return False
+
 
 def repository_client_factory(*args, **kwargs):
     """
@@ -42,6 +62,10 @@ def repository_client_factory(*args, **kwargs):
     """
     # short-term TODO: detect between Nexus and NexusPro
     # long-term TODO: detect and support also Artifactory and ArtifactoryPro
+    
+    if detect_Nexus3(*args):
+        return Nexus3ProRepositoryClient(*args, **kwargs)
+
     return NexusProRepositoryClient(*args, **kwargs)
 
 
@@ -504,3 +528,55 @@ class NexusProRepositoryClient(NexusRepositoryClient):
     def _get_target_repository(self, staging_repo_id):
         data = self._send_json('service/local/staging/repository/{staging_repo_id}'.format(staging_repo_id=staging_repo_id))
         return data['releaseRepositoryId']
+
+
+class Nexus3ProRepositoryClient(NexusProRepositoryClient):
+    """
+    Class for working with Sonatype Nexus 3 Professional
+    """
+    def __init__(self, repository_url=None, user=None, password=None, verify_ssl=True, staging_repository_url=None):
+        super(Nexus3ProRepositoryClient, self).__init__(repository_url=repository_url, user=user, password=password,
+                                                       verify_ssl=verify_ssl, staging_repository_url=staging_repository_url)
+
+    def resolve_artifact(self, remote_artifact):
+
+        data = self._send_json('service/rest/beta/search/assets', params={'maven.groupId': remote_artifact.group,
+                                                               'maven.artifactId': remote_artifact.artifact,
+                                                               'maven.baseVersion': remote_artifact.version,
+                                                               'repository': remote_artifact.repo_id,
+                                                               'maven.classifier': remote_artifact.classifier,
+                                                               'maven.extension': remote_artifact.extension})['items'][-1]
+
+
+        remote_artifact.group = data.get('groupId', remote_artifact.group)
+        remote_artifact.artifact = data.get('artifactId', remote_artifact.artifact)
+        remote_artifact.classifier = data.get('classifier', remote_artifact.classifier)
+        remote_artifact.extension = data.get('extension', remote_artifact.extension)
+        if 'repositoryPath' in data:
+            remote_artifact.url = '{repository_url}/content/repositories/{repo}{artifact_path}'.format(
+            repository_url=self._repository_url, repo=remote_artifact.repo_id, artifact_path=data['repositoryPath'])
+        else:
+            remote_artifact.url = data['downloadUrl']
+
+        if 'version' in data:
+            remote_artifact.version = data.get('version', remote_artifact.version)
+        elif len(remote_artifact.classifier) > 0:
+            remote_artifact.version = remote_artifact.url.split('/')[-1].replace(remote_artifact.artifact + "-","").replace("-" + remote_artifact.classifier,"").replace("." + remote_artifact.extension,"")
+        else:
+            remote_artifact.version = remote_artifact.url.split('/')[-1].replace(remote_artifact.artifact + "-","").replace("." + remote_artifact.extension,"")
+            
+        remote_artifact.snapshot = data.get("snapshot", 'snapshot' in data['repository'])
+        if 'present_locally' in data:
+            remote_artifact.snapshot_buildnumber = data['present_locally']
+        if 'snapshotBuildNumber' in data:
+            remote_artifact.snapshot_buildnumber = data['snapshotBuildNumber']
+        if 'snapshotTimeStamp' in data:
+            remote_artifact.snapshot_timestamp = data['snapshotTimeStamp']
+        if 'baseVersion' in data:
+            remote_artifact.base_version = data['baseVersion']
+        if 'sha1' in data:
+            remote_artifact.sha1 = data.get('sha1')
+        if 'checksum' in data:
+            remote_artifact.sha1 = data.get('checksum').get('sha1')   
+
+    
